@@ -12,6 +12,8 @@ source = "vcs"
 [tool.hatch.build.targets.wheel]
 packages = ["src/maps_omezarr_converter"]
 
+[tool.hatch.metadata] 
+allow-direct-references = true
 
 # Project metadata (see https://peps.python.org/pep-0621)
 [project]
@@ -27,9 +29,13 @@ authors = [
 # Required Python version and dependencies
 requires-python = ">=3.11"
 dependencies = [
+    #"fractal-converters-tools >= 0.6.0,<0.7.0",
+    "fractal-converters-tools@git+https://github.com/fstur/fractal-converters-tools#egg=main",
     "fractal-converters-tools >= 0.6.0,<0.7.0",
     "fractal-task-tools==0.0.12",
+    "lxml",
     "ngio>=0.2.7,<0.3.0",
+    "tifffile",
 ]
 
 # Optional dependencies (e.g. for `pip install -e ".[dev]"`, see
