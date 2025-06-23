@@ -53,13 +53,13 @@ def _get_stage_position(
     stage_pos_x, stage_pos_y = np.dot(
         transformMatrix, np.array([stage_pos_x, stage_pos_y])
     )
-    return stage_pos_x, stage_pos_y
+    return stage_pos_x, -stage_pos_y
 
 
 def _get_grid_position(tif_path: Path) -> tuple[float, float]:
     name = tif_path.stem
     y_idx, x_idx = name.split("_")[1].split("-")[:2]
-    return int(x_idx), -int(y_idx)
+    return int(x_idx), int(y_idx)
 
 
 def _build_tiles(

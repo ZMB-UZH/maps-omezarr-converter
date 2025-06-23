@@ -25,7 +25,7 @@ def convert_maps_to_omezarr(
     tiling_mode: Literal["auto", "grid", "free", "none"] = "auto",
     swap_xy: bool = False,
     invert_x: bool = False,
-    invert_y: bool = True,
+    invert_y: bool = False,
     max_xy_chunk: int = 4096,
     z_chunk: int = 1,
     c_chunk: int = 1,
