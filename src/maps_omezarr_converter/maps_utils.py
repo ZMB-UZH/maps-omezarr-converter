@@ -119,7 +119,6 @@ def _build_tiles(
             x_micrometer_original=stage_pos_x,
             y_micrometer_original=stage_pos_y,
             z_micrometer_original=0,
-            t_original=0,
         )
         tile = Tile(
             top_l=top_l,
@@ -143,6 +142,7 @@ def _build_tiled_image(
         path_builder=SimplePathBuilder(path=zarr_name),
         channel_names=["C00"],
         wavelength_ids=["C00"],
+        channel_colors=["FFFFFF"],
     )
     for tile in _build_tiles(tif_list, metadata_dict, gridmode):
         tiled_image.add_tile(tile)
