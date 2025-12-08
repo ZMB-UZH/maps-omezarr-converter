@@ -29,11 +29,10 @@ authors = [
 # Required Python version and dependencies
 requires-python = ">=3.11"
 dependencies = [
-    #"fractal-converters-tools >= 0.6.1,<0.7.0",
-    "fractal-converters-tools@git+https://github.com/fstur/fractal-converters-tools.git@colors",
+    "ome-zarr-converters-tools>=0.6.4",
     "fractal-task-tools==0.0.12",
     "lxml",
-    "ngio>=0.3.2,<0.4.0",
+    "ngio",
     "tifffile",
 ]
 

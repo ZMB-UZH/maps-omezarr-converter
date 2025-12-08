@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Literal
 
-from fractal_converters_tools import (
+from ome_zarr_converters_tools import (
     AdvancedComputeOptions,
 )
 
