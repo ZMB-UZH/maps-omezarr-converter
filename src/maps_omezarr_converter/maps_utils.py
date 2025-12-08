@@ -7,7 +7,7 @@ from xml.etree import ElementTree as ET
 
 import numpy as np
 import tifffile
-from fractal_converters_tools import (
+from ome_zarr_converters_tools import (
     OriginDict,
     Point,
     SimplePathBuilder,

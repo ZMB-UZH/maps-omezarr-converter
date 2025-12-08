@@ -3,7 +3,7 @@
 import logging
 from pathlib import Path
 
-from fractal_converters_tools import (
+from ome_zarr_converters_tools import (
     AdvancedComputeOptions,
     build_parallelization_list,
 )
