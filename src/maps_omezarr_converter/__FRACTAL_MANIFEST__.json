@@ -12,7 +12,7 @@
         "EM",
         "Image converter"
       ],
-      "docs_info": "### Purpose\n- Convert a FEI/Thermo Fisher MAPS acquisition to a single stitched OME-Zarr image.\n\n### Outputs\n- One OME-Zarr image per acquisition.\n\n### Limitations\n- This task has been tested on a limited set of MAPS acquisitions. It may not work on all MAPS projects.\n- Tile stage positions and pixel size are read from the embedded `FEI_TITAN` TIFF tag; the in-plane rotation angle is read from `MapsProject.xml`.\n- See below for more detailed input expectations.\n\n### Expected inputs\nThe acquisition is identified by the MAPS **project folder** and the **acquisition name** (the layer folder name). (The names in curly braces `{}` can be freely chosen by the user.)\n\n```text\n.../{project}\n----/MapsProject.xml\n----/LayersData\n--------/Layer\n------------/{acquisition_name}\n----------------/{tile1}.tif\n----------------/{tile2}.tif\n----------------/...\n```\n\n- `Project Path`: path to `.../{project}` (the folder containing `MapsProject.xml`).\n- `Acquisition Name`: the `{acquisition_name}` folder under `LayersData/Layer`.\n- output: a single OME-Zarr image stitched from all TIFF tiles in the acquisition.\n",
+      "docs_info": "### Purpose\n- Convert a FEI/Thermo Fisher MAPS acquisition to a single stitched OME-Zarr image.\n\n### Outputs\n- One OME-Zarr image per acquisition.\n\n### Limitations\n- This task has been tested on a limited set of MAPS acquisitions. It may not work on all MAPS projects.\n- Tile positions are reconstructed from the grid geometry in `MapsProject.xml` (columns, rows, tile and mosaic field widths, pixel size) combined with each tile's `(row, column)` index from its filename. This works regardless of whether the tiles embed the `FEI_TITAN` metadata tag.\n- The output mosaic is axis-aligned (the project's in-plane rotation is not applied).\n- See below for more detailed input expectations.\n\n### Expected inputs\nThe acquisition is identified by the MAPS **project folder**, the **layer** name and the **acquisition name**. (The names in curly braces `{}` can be freely chosen by the user.)\n\n```text\n.../{project}\n----/MapsProject.xml\n----/LayersData\n--------/{layer}\n------------/{acquisition_name}\n----------------/Tile_001-001-000000_0-000.tif\n----------------/Tile_001-002-000000_0-000.tif\n----------------/...\n```\n\n- `Project Path`: path to `.../{project}` (the folder containing `MapsProject.xml`).\n- `Layer`: the `{layer}` folder under `LayersData`. MAPS projects can have multiple, arbitrarily named layers; defaults to `Layer`.\n- `Acquisition Name`: the `{acquisition_name}` folder under the layer.\n- output: a single OME-Zarr image stitched from all TIFF tiles in the acquisition.\n",
       "type": "converter_compound",
       "executable_non_parallel": "maps/convert_maps_init_task.py",
       "executable_parallel": "common/single_image_compute_task.py",
@@ -447,8 +447,14 @@
                 "type": "string"
               },
               "acquisition_name": {
-                "description": "Name of the acquisition to convert (the folder name under\n``LayersData/Layer``).",
+                "description": "Name of the acquisition to convert (the folder name under\n``LayersData/{layer}``).",
                 "title": "Acquisition Name",
+                "type": "string"
+              },
+              "layer": {
+                "default": "Layer",
+                "description": "Name of the layer the acquisition belongs to (the folder under\n``LayersData``). MAPS projects can have multiple, arbitrarily named layers;\ndefaults to ``\"Layer\"``.",
+                "title": "Layer",
                 "type": "string"
               },
               "image_name": {

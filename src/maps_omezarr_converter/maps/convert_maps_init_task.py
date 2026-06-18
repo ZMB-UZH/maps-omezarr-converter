@@ -34,7 +34,14 @@ class MapsAcquisitionModel(BaseAcquisitionModel):
     acquisition_name: str
     """
     Name of the acquisition to convert (the folder name under
-    ``LayersData/Layer``).
+    ``LayersData/{layer}``).
+    """
+
+    layer: str = "Layer"
+    """
+    Name of the layer the acquisition belongs to (the folder under
+    ``LayersData``). MAPS projects can have multiple, arbitrarily named layers;
+    defaults to ``"Layer"``.
     """
 
     image_name: str | None = None
@@ -54,7 +61,12 @@ class MapsAcquisitionModel(BaseAcquisitionModel):
     @property
     def acquisition_path(self) -> Path:
         """Path to the acquisition layer directory containing the TIFF tiles."""
-        return self.project_path_obj / "LayersData" / "Layer" / self.acquisition_name
+        return self.project_path_obj / "LayersData" / self.layer / self.acquisition_name
+
+    @property
+    def display_name_path(self) -> str:
+        """The acquisition's ``displayName`` key in ``MapsProject.xml``."""
+        return f"LayersData\\{self.layer}\\{self.acquisition_name}"
 
     @property
     def normalized_image_name(self) -> str:

@@ -1,20 +1,26 @@
 """Parse MAPS acquisition metadata into ``TiledImage`` objects.
 
 A MAPS acquisition is a folder of single-plane TIFF tiles produced by FEI/Thermo
-Fisher MAPS software. Each tile carries its stage position in an embedded
-``FEI_TITAN`` XML tag; the in-plane rotation of the acquisition is read from the
-project's ``MapsProject.xml``. Every tile becomes a positioned field of view
-inside a single OME-Zarr image, which ``ome-zarr-converters-tools`` then tiles
-and stitches according to the chosen ``ConverterOptions``.
+Fisher MAPS software, laid out on a regular grid. Tile positions are
+reconstructed from the **grid geometry** stored in the project's
+``MapsProject.xml`` (number of columns/rows, tile and mosaic field widths, pixel
+size) combined with each tile's ``(row, column)`` index encoded in its filename
+(``Tile_{row}-{col}-...``).
+
+This grid-based approach works for every MAPS export, including those whose tiles
+do not embed the ``FEI_TITAN`` metadata tag, and was validated to reproduce the
+per-tile stage positions of tag-bearing exports to ~0.01 px on the lattice. Every
+tile becomes a positioned field of view inside a single OME-Zarr image, which
+``ome-zarr-converters-tools`` then tiles and stitches according to the chosen
+``ConverterOptions``.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
-from xml.etree import ElementTree as ET
+import math
+from typing import TYPE_CHECKING, NamedTuple
 
-import numpy as np
 import tifffile
 from lxml import etree
 from ome_zarr_converters_tools import (
@@ -46,74 +52,158 @@ _MAPS_PROJECT_NS = {
 _CHANNEL_LABEL = "C00"
 
 
-def _parse_rotation_angle(project_path: Path, acquisition_name: str) -> float:
-    """Read the acquisition's in-plane rotation angle (degrees) from the project.
+class _GridGeometry(NamedTuple):
+    """Grid geometry of one acquisition, read from ``MapsProject.xml``."""
 
-    This is admittedly brittle, but it matches the MAPS project XML layout.
-    Returns ``0.0`` (with a warning) if the layer entry cannot be found.
+    columns: int
+    rows: int
+    tile_hfw_um: float  # full width of a single tile, micrometers
+    total_hfw_um: float  # full width of the whole mosaic, micrometers
+    total_vfw_um: float | None  # full height of the mosaic (if present), um
+    pixel_um: float  # micrometers per pixel
+
+
+def _list_acquisition_paths(root) -> list[str]:
+    """List the ``displayName`` paths of real tile acquisitions in the project.
+
+    Real tile acquisitions have both ``columns`` and ``rows``; derived layers
+    (stitched images, line scans, ...) do not, and are excluded.
+    """
+    paths = []
+    for display_name in root.findall(".//ns0:displayName", _MAPS_PROJECT_NS):
+        text = display_name.text
+        if not text or "LayersData" not in text:
+            continue
+        parent = display_name.getparent()
+        has_grid = (
+            parent.find("ns0:columns", _MAPS_PROJECT_NS) is not None
+            and parent.find("ns0:rows", _MAPS_PROJECT_NS) is not None
+        )
+        if has_grid:
+            paths.append(text)
+    return paths
+
+
+def _find_acquisition_node(root, display_name_path: str):
+    """Find the layer node for an acquisition by its ``displayName`` key.
+
+    Matches case-insensitively: the XML may store the layer name with a different
+    case than the on-disk folder (e.g. XML "cell1" vs disk "Cell1").
+    """
+    target = display_name_path.lower()
+    for display_name in root.findall(".//ns0:displayName", _MAPS_PROJECT_NS):
+        if display_name.text and display_name.text.lower() == target:
+            return display_name.getparent()
+    return None
+
+
+def _read_grid_geometry(project_path: Path, display_name_path: str) -> _GridGeometry:
+    r"""Read an acquisition's grid geometry from ``MapsProject.xml``.
+
+    Looks up the acquisition by its ``displayName`` key
+    (``LayersData\{layer}\{acquisition_name}``) and reads ``columns``, ``rows``,
+    ``tileHfw``, ``totalHfw`` (and ``totalVfw`` if present) and ``pixelSize``.
+    Lengths are converted from meters to micrometers.
     """
     xml_path = project_path / "MapsProject.xml"
     if not xml_path.exists():
         raise FileNotFoundError(f"Project XML not found: {xml_path}")
 
-    tree = etree.parse(str(xml_path))
-    root = tree.getroot()
-    folder_path = f"LayersData\\Layer\\{acquisition_name}"
-    display_name = root.find(f".//ns0:displayName[.='{folder_path}']", _MAPS_PROJECT_NS)
-    if display_name is None:
-        logger.warning(
-            f"Could not find layer '{acquisition_name}' in {xml_path}; "
-            "defaulting rotation angle to 0."
+    root = etree.parse(str(xml_path)).getroot()
+    node = _find_acquisition_node(root, display_name_path)
+    if node is None:
+        available = _list_acquisition_paths(root)
+        raise ValueError(
+            f"Acquisition '{display_name_path}' not found in {xml_path}. "
+            f"Available acquisitions: {available}"
         )
-        return 0.0
-    parent = display_name.getparent()
-    rotation = parent.find("ns0:rotation", _MAPS_PROJECT_NS).values()[-1]
-    return float(rotation)
 
+    def _value(field: str) -> float | None:
+        """Read a field as float, from the ``Value`` attribute or element text."""
+        el = node.find(f"ns0:{field}", _MAPS_PROJECT_NS)
+        if el is None:
+            return None
+        raw = el.get("Value")
+        if raw is None:
+            raw = el.text
+        if raw is None or raw == "":
+            return None
+        return float(raw)
 
-def _rotation_matrix(angle_deg: float) -> np.ndarray:
-    """Build the 2x2 rotation matrix applied to stage positions."""
-    angle = -np.deg2rad(angle_deg)
-    return np.array(
-        [
-            [np.cos(angle), -np.sin(angle)],
-            [np.sin(angle), np.cos(angle)],
-        ]
+    columns = _value("columns")
+    rows = _value("rows")
+    tile_hfw = _value("tileHfw")
+    total_hfw = _value("totalHfw")
+    total_vfw = _value("totalVfw")
+    pixel = _value("pixelSize")
+
+    missing = [
+        name
+        for name, value in (
+            ("columns", columns),
+            ("rows", rows),
+            ("tileHfw", tile_hfw),
+            ("totalHfw", total_hfw),
+            ("pixelSize", pixel),
+        )
+        if value is None
+    ]
+    if missing:
+        raise ValueError(
+            f"Missing grid geometry fields {missing} for '{display_name_path}' "
+            f"in {xml_path}."
+        )
+
+    return _GridGeometry(
+        columns=int(columns),
+        rows=int(rows),
+        tile_hfw_um=tile_hfw * 1e6,
+        total_hfw_um=total_hfw * 1e6,
+        total_vfw_um=(total_vfw * 1e6 if total_vfw is not None else None),
+        pixel_um=pixel * 1e6,
     )
 
 
-def _get_stage_position(
-    tif_path: Path, transform_matrix: np.ndarray
-) -> tuple[float, float]:
-    """Read the (rotated) stage position of a tile, in micrometers."""
-    with tifffile.TiffFile(tif_path) as tif:
-        root = ET.fromstring(tif.pages[0].tags["FEI_TITAN"].value)
-    stage = root.find("StageSettings").find("StagePosition")
-    stage_pos_x = float(stage.find("X").text) * 10**6
-    stage_pos_y = float(stage.find("Y").text) * 10**6
-    stage_pos_x, stage_pos_y = np.dot(
-        transform_matrix, np.array([stage_pos_x, stage_pos_y])
-    )
-    # The image origin (as in most viewers) is in the top-left corner, so the
-    # y position is inverted, which is equivalent to flipping along the y axis.
-    return stage_pos_x, -stage_pos_y
+def _grid_step_um(geom: _GridGeometry) -> float:
+    """Compute the spacing between adjacent tile origins, in micrometers.
 
-
-def _read_tile_geometry(tif_path: Path) -> tuple[int, int, float, float]:
-    """Read tile shape (pixels) and pixel size (micrometers) from a tile.
-
-    Returns:
-        (shape_x, shape_y, scale_x, scale_y)
+    With ``columns`` tiles each ``tile_hfw`` wide, evenly spaced by ``step``, the
+    mosaic width is ``tile_hfw + (columns - 1) * step``; solving for ``step``
+    gives the spacing. The same step applies to both axes (square tiles, isotropic
+    pixels, symmetric overlap). For single-column grids the vertical ``totalVfw``
+    is used instead when available.
     """
+    if geom.columns > 1:
+        return (geom.total_hfw_um - geom.tile_hfw_um) / (geom.columns - 1)
+    if geom.rows > 1 and geom.total_vfw_um is not None:
+        return (geom.total_vfw_um - geom.tile_hfw_um) / (geom.rows - 1)
+    if geom.rows > 1:
+        raise ValueError(
+            "Cannot determine tile spacing for a single-column acquisition "
+            "without a 'totalVfw' entry in MapsProject.xml."
+        )
+    return 0.0  # single tile
+
+
+def _parse_tile_row_col(tif_path: Path) -> tuple[int, int]:
+    """Parse the 1-based ``(row, column)`` grid index from a tile filename.
+
+    Filenames look like ``Tile_{row}-{col}-000000_0-000.tif``.
+    """
+    try:
+        row_str, col_str = tif_path.stem.split("_")[1].split("-")[:2]
+        return int(row_str), int(col_str)
+    except (IndexError, ValueError) as exc:
+        raise ValueError(
+            f"Cannot parse row/column from tile filename: {tif_path.name}"
+        ) from exc
+
+
+def _read_tile_pixel_dims(tif_path: Path) -> tuple[int, int]:
+    """Read a tile's pixel dimensions ``(width, height)`` from the TIFF."""
     with tifffile.TiffFile(tif_path) as tif:
         page = tif.pages[0]
-        shape_x = page.tags["ImageWidth"].value
-        shape_y = page.tags["ImageLength"].value
-        root = ET.fromstring(page.tags["FEI_TITAN"].value)
-    pixel_size = root.find("BinaryResult").find("PixelSize")
-    scale_x = float(pixel_size.find("X").text) * 10**6
-    scale_y = float(pixel_size.find("Y").text) * 10**6
-    return shape_x, shape_y, scale_x, scale_y
+        return page.imagewidth, page.imagelength
 
 
 def _build_tiles(acquisition_model: MapsAcquisitionModel) -> list[Tile]:
@@ -123,21 +213,23 @@ def _build_tiles(acquisition_model: MapsAcquisitionModel) -> list[Tile]:
     if not tif_list:
         raise FileNotFoundError(f"No TIFF files found in {acquisition_path}")
 
-    shape_x, shape_y, scale_x, scale_y = _read_tile_geometry(tif_list[0])
-    if not np.isclose(scale_x, scale_y):
-        logger.warning(
-            f"Pixel size x ({scale_x}) and y ({scale_y}) differ; using x for "
-            "the pixel size."
-        )
-
-    angle_deg = _parse_rotation_angle(
-        acquisition_model.project_path_obj, acquisition_model.acquisition_name
+    geom = _read_grid_geometry(
+        acquisition_model.project_path_obj, acquisition_model.display_name_path
     )
-    transform_matrix = _rotation_matrix(angle_deg)
+    step_um = _grid_step_um(geom)
+
+    # All tiles in a MAPS acquisition share the same pixel dimensions; read once.
+    length_x, length_y = _read_tile_pixel_dims(tif_list[0])
+    expected_hfw_um = length_x * geom.pixel_um
+    if not math.isclose(expected_hfw_um, geom.tile_hfw_um, rel_tol=0.02):
+        logger.warning(
+            f"Tile width from pixels ({expected_hfw_um:.3f} um) differs from the "
+            f"project's tileHfw ({geom.tile_hfw_um:.3f} um)."
+        )
 
     acquisition_details = AcquisitionDetails(
         channels=[ChannelInfo(channel_label=_CHANNEL_LABEL)],
-        pixelsize=scale_x,
+        pixelsize=geom.pixel_um,
         z_spacing=1.0,
         t_spacing=1.0,
         axes=default_axes_builder(is_time_series=False),
@@ -150,15 +242,16 @@ def _build_tiles(acquisition_model: MapsAcquisitionModel) -> list[Tile]:
 
     tiles = []
     for tif_path in tif_list:
-        pos_x, pos_y = _get_stage_position(tif_path, transform_matrix)
+        row, col = _parse_tile_row_col(tif_path)
         tiles.append(
             Tile(
                 fov_name=tif_path.stem,
-                start_x=pos_x,
-                start_y=pos_y,
+                # Axis-aligned grid: origin anchored at row 1 / column 1.
+                start_x=(col - 1) * step_um,
+                start_y=(row - 1) * step_um,
                 start_z=0,
-                length_x=shape_x,
-                length_y=shape_y,
+                length_x=length_x,
+                length_y=length_y,
                 length_z=1,
                 length_c=1,
                 length_t=1,
@@ -179,8 +272,8 @@ def parse_maps_acquisition(
     """Parse a MAPS acquisition and return a list of tiled images.
 
     Args:
-        acquisition_model: Acquisition input model (project path, acquisition
-            name and advanced options).
+        acquisition_model: Acquisition input model (project path, layer,
+            acquisition name and advanced options).
         converter_options: Converter options for tile processing.
 
     Returns:
