@@ -40,6 +40,7 @@ dependencies = [
     "fractal-task-tools>=0.5.0,<0.6.0",
     "tifffile",
     "lxml",
+    "zarrs",
 ]
 
 # Optional dependencies (e.g. for `pip install -e ".[dev]"`, see
