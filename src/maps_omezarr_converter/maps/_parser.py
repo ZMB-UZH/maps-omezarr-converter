@@ -7,18 +7,23 @@ reconstructed from the **grid geometry** stored in the project's
 size) combined with each tile's ``(row, column)`` index encoded in its filename
 (``Tile_{row}-{col}-...``).
 
+The project XML also enumerates every acquisition (by its ``displayName``), so a
+single acquisition model can expand to a batch: one acquisition, all
+acquisitions in a layer, or all acquisitions in every layer (see
+``_resolve_acquisitions``). Each acquisition becomes its own single OME-Zarr
+image, which ``ome-zarr-converters-tools`` then tiles and stitches according to
+the chosen ``ConverterOptions``.
+
 This grid-based approach works for every MAPS export, including those whose tiles
 do not embed the ``FEI_TITAN`` metadata tag, and was validated to reproduce the
-per-tile stage positions of tag-bearing exports to ~0.01 px on the lattice. Every
-tile becomes a positioned field of view inside a single OME-Zarr image, which
-``ome-zarr-converters-tools`` then tiles and stitches according to the chosen
-``ConverterOptions``.
+per-tile stage positions of tag-bearing exports to ~0.01 px on the lattice.
 """
 
 from __future__ import annotations
 
 import logging
 import math
+import re
 from typing import TYPE_CHECKING, NamedTuple
 
 import tifffile
@@ -63,13 +68,27 @@ class _GridGeometry(NamedTuple):
     pixel_um: float  # micrometers per pixel
 
 
-def _list_acquisition_paths(root) -> list[str]:
-    """List the ``displayName`` paths of real tile acquisitions in the project.
+def _sanitize_name(name: str) -> str:
+    """Sanitize a name for use as an OME-Zarr image path."""
+    return re.sub(r"[^A-Za-z0-9\-_. ]", "_", name)
 
+
+def _load_project_root(project_path: Path):
+    """Parse ``MapsProject.xml`` and return its root element."""
+    xml_path = project_path / "MapsProject.xml"
+    if not xml_path.exists():
+        raise FileNotFoundError(f"Project XML not found: {xml_path}")
+    return etree.parse(str(xml_path)).getroot()
+
+
+def _iter_project_acquisitions(root) -> list[tuple[str, str, str]]:
+    """List the real tile acquisitions declared in the project.
+
+    Returns a list of ``(layer, acquisition_name, display_name_path)`` tuples.
     Real tile acquisitions have both ``columns`` and ``rows``; derived layers
     (stitched images, line scans, ...) do not, and are excluded.
     """
-    paths = []
+    acquisitions = []
     for display_name in root.findall(".//ns0:displayName", _MAPS_PROJECT_NS):
         text = display_name.text
         if not text or "LayersData" not in text:
@@ -79,9 +98,20 @@ def _list_acquisition_paths(root) -> list[str]:
             parent.find("ns0:columns", _MAPS_PROJECT_NS) is not None
             and parent.find("ns0:rows", _MAPS_PROJECT_NS) is not None
         )
-        if has_grid:
-            paths.append(text)
-    return paths
+        if not has_grid:
+            continue
+        parts = text.split("\\")
+        if len(parts) < 3:
+            continue
+        layer = parts[1]
+        acquisition_name = "\\".join(parts[2:])
+        acquisitions.append((layer, acquisition_name, text))
+    return acquisitions
+
+
+def _list_acquisition_paths(root) -> list[str]:
+    """List the ``displayName`` paths of real tile acquisitions in the project."""
+    return [path for _, _, path in _iter_project_acquisitions(root)]
 
 
 def _find_acquisition_node(root, display_name_path: str):
@@ -97,26 +127,12 @@ def _find_acquisition_node(root, display_name_path: str):
     return None
 
 
-def _read_grid_geometry(project_path: Path, display_name_path: str) -> _GridGeometry:
-    r"""Read an acquisition's grid geometry from ``MapsProject.xml``.
+def _grid_geometry_from_node(node, display_name_path: str) -> _GridGeometry:
+    """Read grid geometry from an acquisition's XML node.
 
-    Looks up the acquisition by its ``displayName`` key
-    (``LayersData\{layer}\{acquisition_name}``) and reads ``columns``, ``rows``,
-    ``tileHfw``, ``totalHfw`` (and ``totalVfw`` if present) and ``pixelSize``.
-    Lengths are converted from meters to micrometers.
+    Reads ``columns``, ``rows``, ``tileHfw``, ``totalHfw`` (and ``totalVfw`` if
+    present) and ``pixelSize``. Lengths are converted from meters to micrometers.
     """
-    xml_path = project_path / "MapsProject.xml"
-    if not xml_path.exists():
-        raise FileNotFoundError(f"Project XML not found: {xml_path}")
-
-    root = etree.parse(str(xml_path)).getroot()
-    node = _find_acquisition_node(root, display_name_path)
-    if node is None:
-        available = _list_acquisition_paths(root)
-        raise ValueError(
-            f"Acquisition '{display_name_path}' not found in {xml_path}. "
-            f"Available acquisitions: {available}"
-        )
 
     def _value(field: str) -> float | None:
         """Read a field as float, from the ``Value`` attribute or element text."""
@@ -150,8 +166,7 @@ def _read_grid_geometry(project_path: Path, display_name_path: str) -> _GridGeom
     ]
     if missing:
         raise ValueError(
-            f"Missing grid geometry fields {missing} for '{display_name_path}' "
-            f"in {xml_path}."
+            f"Missing grid geometry fields {missing} for '{display_name_path}'."
         )
 
     return _GridGeometry(
@@ -162,6 +177,23 @@ def _read_grid_geometry(project_path: Path, display_name_path: str) -> _GridGeom
         total_vfw_um=(total_vfw * 1e6 if total_vfw is not None else None),
         pixel_um=pixel * 1e6,
     )
+
+
+def _read_grid_geometry(project_path: Path, display_name_path: str) -> _GridGeometry:
+    r"""Read an acquisition's grid geometry from ``MapsProject.xml``.
+
+    Looks up the acquisition by its ``displayName`` key
+    (``LayersData\{layer}\{acquisition_name}``) and reads its grid geometry.
+    """
+    root = _load_project_root(project_path)
+    node = _find_acquisition_node(root, display_name_path)
+    if node is None:
+        available = _list_acquisition_paths(root)
+        raise ValueError(
+            f"Acquisition '{display_name_path}' not found in MapsProject.xml. "
+            f"Available acquisitions: {available}"
+        )
+    return _grid_geometry_from_node(node, display_name_path)
 
 
 def _grid_step_um(geom: _GridGeometry) -> float:
@@ -206,16 +238,135 @@ def _read_tile_pixel_dims(tif_path: Path) -> tuple[int, int]:
         return page.imagewidth, page.imagelength
 
 
-def _build_tiles(acquisition_model: MapsAcquisitionModel) -> list[Tile]:
-    """Build positioned ``Tile`` objects for every TIFF in the acquisition."""
-    acquisition_path = acquisition_model.acquisition_path
-    tif_list = sorted(acquisition_path.glob("*.tif"))
-    if not tif_list:
-        raise FileNotFoundError(f"No TIFF files found in {acquisition_path}")
+def _resolve_child_dir(parent: Path, name: str) -> Path | None:
+    """Resolve a child directory by name, case-insensitively.
 
-    geom = _read_grid_geometry(
-        acquisition_model.project_path_obj, acquisition_model.display_name_path
+    Handles the case mismatch between the XML layer name and the on-disk folder
+    (e.g. XML "cell1" vs disk "Cell1").
+    """
+    candidate = parent / name
+    if candidate.is_dir():
+        return candidate
+    if not parent.is_dir():
+        return None
+    lower = name.lower()
+    for child in parent.iterdir():
+        if child.is_dir() and child.name.lower() == lower:
+            return child
+    return None
+
+
+def _resolve_acquisitions(
+    acquisition_model: MapsAcquisitionModel,
+    all_acquisitions: list[tuple[str, str, str]],
+) -> list[tuple[str, str]]:
+    """Resolve which ``(layer, acquisition_name)`` pairs to convert.
+
+    - Single acquisition (layer and name set): that one pair, case-canonicalized
+      against the project XML when possible (so single and batch conversions
+      produce the same output name for the same acquisition).
+    - Layer set, name empty: every acquisition in that layer.
+    - Layer empty: every acquisition in every layer.
+    """
+    if acquisition_model.is_single_acquisition:
+        layer_lower = acquisition_model.layer.lower()
+        name_lower = acquisition_model.acquisition_name.lower()
+        for layer, name, _ in all_acquisitions:
+            if layer.lower() == layer_lower and name.lower() == name_lower:
+                return [(layer, name)]
+        # Not listed in the XML; fall back (the build step raises a clear error).
+        return [(acquisition_model.layer, acquisition_model.acquisition_name)]
+
+    if not acquisition_model.layer_is_empty:
+        layer_lower = acquisition_model.layer.lower()
+        selected = [
+            (layer, name)
+            for layer, name, _ in all_acquisitions
+            if layer.lower() == layer_lower
+        ]
+        if not selected:
+            layers = sorted({layer for layer, _, _ in all_acquisitions})
+            raise ValueError(
+                f"No acquisitions found for layer '{acquisition_model.layer}'. "
+                f"Available layers: {layers}"
+            )
+        return selected
+
+    selected = [(layer, name) for layer, name, _ in all_acquisitions]
+    if not selected:
+        raise ValueError("No tile acquisitions found in the project.")
+    return selected
+
+
+def _assign_image_names(
+    acquisition_model: MapsAcquisitionModel,
+    resolved: list[tuple[str, str]],
+    multi_layer: bool,
+) -> dict[tuple[str, str], str]:
+    """Assign a unique output image name to each resolved acquisition.
+
+    An explicit ``image_name`` override is honored only for a single acquisition.
+    Otherwise the name is derived from the acquisition name, prefixed with the
+    layer when the project contains more than one layer (``multi_layer``) — so
+    images from multi-layer projects carry their provenance and never collide
+    across layers, while single-layer projects keep clean, unprefixed names. A
+    final collision check forces the layer prefix as a safety net.
+    """
+    if (
+        acquisition_model.is_single_acquisition
+        and acquisition_model.image_name is not None
+    ):
+        layer, name = resolved[0]
+        return {(layer, name): acquisition_model.normalized_image_name}
+
+    if multi_layer:
+        names = {
+            (layer, name): _sanitize_name(f"{layer}_{name}")
+            for layer, name in resolved
+        }
+    else:
+        names = {(layer, name): _sanitize_name(name) for layer, name in resolved}
+
+    if len(set(names.values())) != len(names):
+        names = {
+            (layer, name): _sanitize_name(f"{layer}_{name}")
+            for layer, name in resolved
+        }
+    return names
+
+
+def _build_acquisition_tiles(
+    project_path: Path,
+    root,
+    layer: str,
+    acquisition_name: str,
+    image_name: str,
+    advanced,
+) -> list[Tile]:
+    """Build positioned ``Tile`` objects for a single acquisition."""
+    layers_dir = project_path / "LayersData"
+    layer_dir = _resolve_child_dir(layers_dir, layer)
+    acquisition_dir = (
+        _resolve_child_dir(layer_dir, acquisition_name) if layer_dir else None
     )
+    if acquisition_dir is None:
+        raise FileNotFoundError(
+            f"Acquisition directory not found: "
+            f"{layers_dir / layer / acquisition_name}"
+        )
+    tif_list = sorted(acquisition_dir.glob("*.tif"))
+    if not tif_list:
+        raise FileNotFoundError(f"No TIFF files found in {acquisition_dir}")
+
+    display_name_path = f"LayersData\\{layer}\\{acquisition_name}"
+    node = _find_acquisition_node(root, display_name_path)
+    if node is None:
+        available = _list_acquisition_paths(root)
+        raise ValueError(
+            f"Acquisition '{display_name_path}' not found in MapsProject.xml. "
+            f"Available acquisitions: {available}"
+        )
+    geom = _grid_geometry_from_node(node, display_name_path)
     step_um = _grid_step_um(geom)
 
     # All tiles in a MAPS acquisition share the same pixel dimensions; read once.
@@ -224,7 +375,7 @@ def _build_tiles(acquisition_model: MapsAcquisitionModel) -> list[Tile]:
     if not math.isclose(expected_hfw_um, geom.tile_hfw_um, rel_tol=0.02):
         logger.warning(
             f"Tile width from pixels ({expected_hfw_um:.3f} um) differs from the "
-            f"project's tileHfw ({geom.tile_hfw_um:.3f} um)."
+            f"project's tileHfw ({geom.tile_hfw_um:.3f} um) for '{display_name_path}'."
         )
 
     acquisition_details = AcquisitionDetails(
@@ -234,11 +385,9 @@ def _build_tiles(acquisition_model: MapsAcquisitionModel) -> list[Tile]:
         t_spacing=1.0,
         axes=default_axes_builder(is_time_series=False),
     )
-    acquisition_details = acquisition_model.advanced.update_acquisition_details(
-        acquisition_details
-    )
+    acquisition_details = advanced.update_acquisition_details(acquisition_details)
 
-    collection = SingleImage(image_path=acquisition_model.normalized_image_name)
+    collection = SingleImage(image_path=image_name)
 
     tiles = []
     for tif_path in tif_list:
@@ -264,12 +413,58 @@ def _build_tiles(acquisition_model: MapsAcquisitionModel) -> list[Tile]:
     return tiles
 
 
+def _build_tiles(acquisition_model: MapsAcquisitionModel) -> list[Tile]:
+    """Build ``Tile`` objects for every acquisition selected by the model.
+
+    Depending on the model, this is one acquisition, all acquisitions in a layer,
+    or all acquisitions in the project. In batch mode, acquisitions that cannot
+    be built (missing folder/geometry) are skipped with a warning; in
+    single-acquisition mode the error is raised.
+    """
+    project_path = acquisition_model.project_path_obj
+    root = _load_project_root(project_path)
+    all_acquisitions = _iter_project_acquisitions(root)
+    resolved = _resolve_acquisitions(acquisition_model, all_acquisitions)
+    n_layers = len({layer for layer, _, _ in all_acquisitions})
+    names = _assign_image_names(acquisition_model, resolved, multi_layer=n_layers > 1)
+    logger.info(
+        f"Resolved {len(resolved)} acquisition(s) to convert "
+        f"(project has {n_layers} layer(s))."
+    )
+
+    tiles: list[Tile] = []
+    for layer, acquisition_name in resolved:
+        try:
+            tiles.extend(
+                _build_acquisition_tiles(
+                    project_path=project_path,
+                    root=root,
+                    layer=layer,
+                    acquisition_name=acquisition_name,
+                    image_name=names[(layer, acquisition_name)],
+                    advanced=acquisition_model.advanced,
+                )
+            )
+        except (FileNotFoundError, ValueError):
+            if acquisition_model.is_single_acquisition:
+                raise
+            logger.warning(
+                f"Skipping acquisition 'LayersData\\{layer}\\{acquisition_name}'.",
+                exc_info=True,
+            )
+    return tiles
+
+
 def parse_maps_acquisition(
     *,
     acquisition_model: MapsAcquisitionModel,
     converter_options: ConverterOptions,
 ) -> list[TiledImage]:
-    """Parse a MAPS acquisition and return a list of tiled images.
+    """Parse a MAPS acquisition model and return a list of tiled images.
+
+    The model may select a single acquisition, all acquisitions in a layer, or
+    all acquisitions in the project; each selected acquisition yields one
+    TiledImage.
 
     Args:
         acquisition_model: Acquisition input model (project path, layer,

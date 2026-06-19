@@ -12,7 +12,7 @@
         "EM",
         "Image converter"
       ],
-      "docs_info": "### Purpose\n- Convert a FEI/Thermo Fisher MAPS acquisition to a single stitched OME-Zarr image.\n\n### Outputs\n- One OME-Zarr image per acquisition.\n\n### Limitations\n- This task has been tested on a limited set of MAPS acquisitions. It may not work on all MAPS projects.\n- Tile positions are reconstructed from the grid geometry in `MapsProject.xml` (columns, rows, tile and mosaic field widths, pixel size) combined with each tile's `(row, column)` index from its filename. This works regardless of whether the tiles embed the `FEI_TITAN` metadata tag.\n- The output mosaic is axis-aligned (the project's in-plane rotation is not applied).\n- See below for more detailed input expectations.\n\n### Expected inputs\nThe acquisition is identified by the MAPS **project folder**, the **layer** name and the **acquisition name**. (The names in curly braces `{}` can be freely chosen by the user.)\n\n```text\n.../{project}\n----/MapsProject.xml\n----/LayersData\n--------/{layer}\n------------/{acquisition_name}\n----------------/Tile_001-001-000000_0-000.tif\n----------------/Tile_001-002-000000_0-000.tif\n----------------/...\n```\n\n- `Project Path`: path to `.../{project}` (the folder containing `MapsProject.xml`).\n- `Layer`: the `{layer}` folder under `LayersData`. MAPS projects can have multiple, arbitrarily named layers; defaults to `Layer`.\n- `Acquisition Name`: the `{acquisition_name}` folder under the layer.\n- output: a single OME-Zarr image stitched from all TIFF tiles in the acquisition.\n",
+      "docs_info": "### Purpose\n- Convert a FEI/Thermo Fisher MAPS acquisition to a single stitched OME-Zarr image.\n\n### Outputs\n- One OME-Zarr image per acquisition.\n\n### Limitations\n- This task has been tested on a limited set of MAPS acquisitions. It may not work on all MAPS projects.\n- Tile positions are reconstructed from the grid geometry in `MapsProject.xml` (columns, rows, tile and mosaic field widths, pixel size) combined with each tile's `(row, column)` index from its filename. This works regardless of whether the tiles embed the `FEI_TITAN` metadata tag.\n- The output mosaic is axis-aligned (the project's in-plane rotation is not applied).\n- Only tile-scan acquisitions are supported. MAPS-generated \"Stitched images\" layers (pre-stitched pyramids) are **not** converted \u2014 convert the underlying raw tile-scan acquisition instead.\n- See below for more detailed input expectations.\n\n### Expected inputs\nThe acquisition is identified by the MAPS **project folder**, the **layer** name and the **acquisition name**. (The names in curly braces `{}` can be freely chosen by the user.)\n\n```text\n.../{project}\n----/MapsProject.xml\n----/LayersData\n--------/{layer}\n------------/{acquisition_name}\n----------------/Tile_001-001-000000_0-000.tif\n----------------/Tile_001-002-000000_0-000.tif\n----------------/...\n```\n\n- `Project Path`: path to `.../{project}` (the folder containing `MapsProject.xml`).\n- `Layer`: the `{layer}` folder under `LayersData`. MAPS projects can have multiple, arbitrarily named layers; defaults to `Layer`. Leave empty to convert **all** layers.\n- `Acquisition Name`: the `{acquisition_name}` folder under the layer. Leave empty to convert **all** acquisitions in the layer.\n- output: one OME-Zarr image per acquisition, stitched from its TIFF tiles.\n\nBatch conversion (one acquisition entry can expand to many images):\n\n- `Layer` + `Acquisition Name` set: convert that single acquisition.\n- `Layer` set, `Acquisition Name` empty: convert every acquisition in that layer.\n- `Layer` empty: convert every acquisition in every layer (`Acquisition Name` must also be empty).\n\nOutput naming: in projects that contain more than one layer, the layer name is prefixed to each output image name (e.g. `cell1_1.7 nm`) for provenance and to avoid collisions; single-layer projects use the acquisition name alone. An explicit `Image Name` (single-acquisition conversions only) overrides this.\n",
       "type": "converter_compound",
       "executable_non_parallel": "maps/convert_maps_init_task.py",
       "executable_parallel": "common/single_image_compute_task.py",
@@ -446,16 +446,31 @@
                 "title": "Project Path",
                 "type": "string"
               },
-              "acquisition_name": {
-                "description": "Name of the acquisition to convert (the folder name under\n``LayersData/{layer}``).",
-                "title": "Acquisition Name",
-                "type": "string"
-              },
               "layer": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
                 "default": "Layer",
-                "description": "Name of the layer the acquisition belongs to (the folder under\n``LayersData``). MAPS projects can have multiple, arbitrarily named layers;\ndefaults to ``\"Layer\"``.",
-                "title": "Layer",
-                "type": "string"
+                "description": "Name of the layer the acquisition belongs to (the folder under\n``LayersData``). MAPS projects can have multiple, arbitrarily named layers;\ndefaults to ``\"Layer\"``. Leave empty to convert all layers.",
+                "title": "Layer"
+              },
+              "acquisition_name": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Name of the acquisition to convert (the folder name under the layer). Leave\nempty to convert all acquisitions in the layer.",
+                "title": "Acquisition Name"
               },
               "image_name": {
                 "anyOf": [
@@ -467,7 +482,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional custom name for the output OME-Zarr image. If not provided, the\nname is derived from the acquisition name.",
+                "description": "Optional custom name for the output OME-Zarr image. Only applies when\nconverting a single acquisition; ignored for batch conversions. If not\nprovided, the name is derived from the acquisition name.",
                 "title": "Image Name"
               },
               "advanced": {
@@ -490,8 +505,7 @@
               }
             },
             "required": [
-              "project_path",
-              "acquisition_name"
+              "project_path"
             ],
             "title": "MapsAcquisitionModel",
             "type": "object"
