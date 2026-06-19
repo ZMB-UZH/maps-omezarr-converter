@@ -24,10 +24,10 @@ from __future__ import annotations
 import logging
 import math
 import re
+import xml.etree.ElementTree as ET
 from typing import TYPE_CHECKING, NamedTuple
 
 import tifffile
-from lxml import etree
 from ome_zarr_converters_tools import (
     AcquisitionDetails,
     ChannelInfo,
@@ -78,7 +78,21 @@ def _load_project_root(project_path: Path):
     xml_path = project_path / "MapsProject.xml"
     if not xml_path.exists():
         raise FileNotFoundError(f"Project XML not found: {xml_path}")
-    return etree.parse(str(xml_path)).getroot()
+    return ET.parse(str(xml_path)).getroot()
+
+
+def _iter_acquisition_nodes(root):
+    """Yield ``(node, display_text)`` for every element with a ``displayName``.
+
+    Each acquisition/layer in the project XML is an element with a direct
+    ``displayName`` child. Iterating the elements themselves (rather than the
+    ``displayName`` elements) yields the parent node directly, which avoids
+    needing parent pointers (unavailable in the stdlib ``ElementTree``).
+    """
+    for node in root.iter():
+        display_name = node.find("ns0:displayName", _MAPS_PROJECT_NS)
+        if display_name is not None and display_name.text:
+            yield node, display_name.text
 
 
 def _iter_project_acquisitions(root) -> list[tuple[str, str, str]]:
@@ -89,14 +103,12 @@ def _iter_project_acquisitions(root) -> list[tuple[str, str, str]]:
     (stitched images, line scans, ...) do not, and are excluded.
     """
     acquisitions = []
-    for display_name in root.findall(".//ns0:displayName", _MAPS_PROJECT_NS):
-        text = display_name.text
-        if not text or "LayersData" not in text:
+    for node, text in _iter_acquisition_nodes(root):
+        if "LayersData" not in text:
             continue
-        parent = display_name.getparent()
         has_grid = (
-            parent.find("ns0:columns", _MAPS_PROJECT_NS) is not None
-            and parent.find("ns0:rows", _MAPS_PROJECT_NS) is not None
+            node.find("ns0:columns", _MAPS_PROJECT_NS) is not None
+            and node.find("ns0:rows", _MAPS_PROJECT_NS) is not None
         )
         if not has_grid:
             continue
@@ -121,9 +133,9 @@ def _find_acquisition_node(root, display_name_path: str):
     case than the on-disk folder (e.g. XML "cell1" vs disk "Cell1").
     """
     target = display_name_path.lower()
-    for display_name in root.findall(".//ns0:displayName", _MAPS_PROJECT_NS):
-        if display_name.text and display_name.text.lower() == target:
-            return display_name.getparent()
+    for node, text in _iter_acquisition_nodes(root):
+        if text.lower() == target:
+            return node
     return None
 
 
