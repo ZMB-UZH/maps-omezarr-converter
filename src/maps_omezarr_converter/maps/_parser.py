@@ -53,8 +53,9 @@ _MAPS_PROJECT_NS = {
     "ns0": "http://schemas.datacontract.org/2004/07/Fei.Applications.Perseus.Project"
 }
 
-# Single grayscale channel for MAPS (EM) data.
+# Single grayscale channel for MAPS (EM) data, displayed as white.
 _CHANNEL_LABEL = "C00"
+_CHANNEL_COLOR = "#FFFFFF"
 
 
 class _GridGeometry(NamedTuple):
@@ -391,7 +392,7 @@ def _build_acquisition_tiles(
         )
 
     acquisition_details = AcquisitionDetails(
-        channels=[ChannelInfo(channel_label=_CHANNEL_LABEL)],
+        channels=[ChannelInfo(channel_label=_CHANNEL_LABEL, color=_CHANNEL_COLOR)],
         pixelsize=geom.pixel_um,
         z_spacing=1.0,
         t_spacing=1.0,
