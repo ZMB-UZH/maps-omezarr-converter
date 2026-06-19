@@ -5,7 +5,7 @@ on:
     branches:
       - main
     tags:
-      - "*"
+      - "v*.*.*"
   pull_request:
   workflow_dispatch:
   release:
@@ -13,11 +13,34 @@ on:
 
 
 jobs:
+  manifest:
+    name: Check manifest
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install package
+        run: python -m pip install -e .[test]
+
+      - name: Check if manifest is up to date
+        run: fractal-manifest check --package maps_omezarr_converter
+
   tests:
     strategy:
       matrix:
-        os: [ubuntu-22.04, windows-latest]
-        python-version: ["3.11", "3.12"]
+        os: [ubuntu-22.04, windows-latest, macos-latest]
+        python-version: ["3.11", "3.12", "3.13"]
     name: "Core, Python ${{ matrix.python-version }}, ${{ matrix.os }}"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
@@ -35,23 +58,14 @@ jobs:
           cache: "pip"
 
       - name: Install package
-        run: python -m pip install -e .[dev]
-
-      - name: Check if manifest is up to date
-        run: fractal-manifest check --package maps-omezarr-converter
+        run: python -m pip install -e .[test]
 
       - name: Test core library with pytest
-        run: python -m pytest --cov=maps_omezarr_converter --cov-branch --cov-report=xml tests
+        run: python -m pytest tests
 
-      - name: Coverage
-        if: ${{ matrix.python-version == '3.12' }} && ${{ matrix.os == 'ubuntu-22.04' }}
-        uses: codecov/codecov-action@v4
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-  
   deploy:
     name: Deploy
-    needs: tests
+    needs: [tests, manifest]
     if: success() && startsWith(github.ref, 'refs/tags/') && github.event_name != 'schedule'
     runs-on: ubuntu-latest
 
