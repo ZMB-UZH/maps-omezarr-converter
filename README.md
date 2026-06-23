@@ -1,8 +1,11 @@
 # MAPS OME-Zarr Converter
 
 A [Fractal](https://fractal-analytics-platform.github.io/) task to convert
-FEI/Thermo Fisher **MAPS** acquisitions into the
+Thermo Fisher **MAPS** acquisitions into the
 [OME-Zarr](https://ngff.openmicroscopy.org/) format.
+
+Currently supported instruments:
+- TEM - FEI Talos
 
 ## Tasks
 
@@ -17,7 +20,7 @@ image-by-image.
 ## Installation
 
 ```bash
-pip install -e .
+pip install git+https://github.com/ZMB-UZH/maps-omezarr-converter.git
 ```
 
 ## Python API
@@ -33,7 +36,8 @@ convert_maps_to_omezarr(
     acquisitions=[
         MapsAcquisitionModel(
             project_path="/path/to/maps_project",
-            acquisition_name="1.7 nm (4)",
+            layer="Layer_name"
+            acquisition_name="acquisition_name",
         ),
     ],
 )
